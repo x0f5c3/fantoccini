@@ -141,7 +141,6 @@ use std::convert::TryFrom;
 use std::future::Future;
 use std::marker;
 use tokio::sync::oneshot;
-use traits::NewConnector;
 use webdriver::command::{
     NewWindowParameters, SendKeysParameters, SwitchToFrameParameters, SwitchToWindowParameters,
     WebDriverCommand,
@@ -162,6 +161,7 @@ pub mod error;
 
 /// The long-running session future we spawn for multiplexing onto a running WebDriver instance.
 mod session;
+/// Helper traits for WebDriver capabilities
 pub mod traits;
 
 use crate::session::{Cmd, Session};
@@ -209,13 +209,14 @@ impl<'a> From<Locator<'a>> for webdriver::command::LocatorParameters {
     }
 }
 
+use crate::error::NewSessionError;
 pub use crate::session::Client;
 
 /// A single element on the current page.
 #[derive(Clone, Debug, Serialize)]
 pub struct Element<C>
 where
-    C: NewConnector + connect::Connect,
+    C: Clone + Sync + Send + Unpin + 'static + connect::Connect,
 {
     #[serde(skip_serializing)]
     client: Client<C>,
@@ -229,17 +230,15 @@ where
 #[derive(Clone, Debug)]
 pub struct Form<C>
 where
-    C: NewConnector + connect::Connect,
+    C: Clone + Sync + Send + Unpin + 'static + connect::Connect,
 {
     client: Client<C>,
     form: webdriver::common::WebElement,
     _marker: marker::PhantomData<C>,
 }
 
-impl<C> Client<C>
-where
-    C: NewConnector + connect::Connect,
-{
+#[cfg(feature = "rustls-tls")]
+impl Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>> {
     /// Create a new [`Client`][crate::Client] associated with a new WebDriver session on the server at the given
     /// URL.
     ///
@@ -247,9 +246,84 @@ where
     ///
     /// Calls `with_capabilities` with an empty capabilities list.
     #[allow(clippy::new_ret_no_self)]
-    pub async fn new(webdriver: &str) -> Result<Self, error::NewSessionError> {
+    pub async fn new(
+        webdriver: &str,
+    ) -> Result<Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>>, NewSessionError>
+    {
         Self::with_capabilities(webdriver, webdriver::capabilities::Capabilities::new()).await
     }
+    /// Create a new `Client` associated with a new WebDriver session on the server at the given
+    /// URL.
+    ///
+    /// The given capabilities will be requested in `alwaysMatch` or `desiredCapabilities`
+    /// depending on the protocol version supported by the server.
+    ///
+    ///
+    /// Returns a future that resolves to a handle for issuing additional WebDriver tasks.
+    ///
+    /// Note that most callers should explicitly call `Client::close`, and wait for the returned
+    /// future before exiting. Not doing so may result in the WebDriver session not being cleanly
+    /// closed, which is particularly important for some drivers, such as geckodriver, where
+    /// multiple simulatenous sessions are not supported. If `close` is not explicitly called, a
+    /// session close request will be spawned on the given `handle` when the last instance of this
+    /// `Client` is dropped.
+    pub async fn with_capabilities(
+        webdriver: &str,
+        cap: webdriver::capabilities::Capabilities,
+    ) -> Result<Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>>, NewSessionError>
+    {
+        Session::<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>>::with_capabilities(
+            webdriver, cap,
+        )
+        .await
+    }
+}
+#[cfg(feature = "openssl-tls")]
+impl Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>> {
+    /// Create a new [`Client`][crate::Client] associated with a new WebDriver session on the server at the given
+    /// URL.
+    ///
+    ///
+    ///
+    /// Calls `with_capabilities` with an empty capabilities list.
+    #[allow(clippy::new_ret_no_self)]
+    pub async fn new(
+        webdriver: &str,
+    ) -> Result<Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>, NewSessionError>
+    {
+        Self::with_capabilities(webdriver, webdriver::capabilities::Capabilities::new()).await
+    }
+    /// Create a new `Client` associated with a new WebDriver session on the server at the given
+    /// URL.
+    ///
+    /// The given capabilities will be requested in `alwaysMatch` or `desiredCapabilities`
+    /// depending on the protocol version supported by the server.
+    ///
+    ///
+    /// Returns a future that resolves to a handle for issuing additional WebDriver tasks.
+    ///
+    /// Note that most callers should explicitly call `Client::close`, and wait for the returned
+    /// future before exiting. Not doing so may result in the WebDriver session not being cleanly
+    /// closed, which is particularly important for some drivers, such as geckodriver, where
+    /// multiple simulatenous sessions are not supported. If `close` is not explicitly called, a
+    /// session close request will be spawned on the given `handle` when the last instance of this
+    /// `Client` is dropped.
+    pub async fn with_capabilities(
+        webdriver: &str,
+        cap: webdriver::capabilities::Capabilities,
+    ) -> Result<Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>, NewSessionError>
+    {
+        Session::<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>::with_capabilities(
+            webdriver, cap,
+        )
+        .await
+    }
+}
+
+impl<C> Client<C>
+where
+    C: Clone + Sync + Send + Unpin + 'static + connect::Connect,
+{
     /// Create a new [`Client`][crate::Client] associated with a chosen HttpsConnector and a new WebDriver session on the server
     /// at the given URL.
     ///
@@ -293,28 +367,6 @@ where
         connector: C,
     ) -> Result<Self, error::NewSessionError> {
         Session::with_capabilities_and_connector(webdriver, cap, connector).await
-    }
-
-    /// Create a new `Client` associated with a new WebDriver session on the server at the given
-    /// URL.
-    ///
-    /// The given capabilities will be requested in `alwaysMatch` or `desiredCapabilities`
-    /// depending on the protocol version supported by the server.
-    ///
-    ///
-    /// Returns a future that resolves to a handle for issuing additional WebDriver tasks.
-    ///
-    /// Note that most callers should explicitly call `Client::close`, and wait for the returned
-    /// future before exiting. Not doing so may result in the WebDriver session not being cleanly
-    /// closed, which is particularly important for some drivers, such as geckodriver, where
-    /// multiple simulatenous sessions are not supported. If `close` is not explicitly called, a
-    /// session close request will be spawned on the given `handle` when the last instance of this
-    /// `Client` is dropped.
-    pub async fn with_capabilities(
-        webdriver: &str,
-        cap: webdriver::capabilities::Capabilities,
-    ) -> Result<Self, error::NewSessionError> {
-        Session::<C>::with_capabilities(webdriver, cap).await
     }
 
     /// Get the session ID assigned by the WebDriver server to this client.
@@ -1026,7 +1078,7 @@ where
 
 impl<C> Element<C>
 where
-    C: NewConnector + connect::Connect,
+    C: Clone + Sync + Send + Unpin + 'static + connect::Connect,
 {
     /// Look up an [attribute] value for this element by name.
     ///
@@ -1257,7 +1309,7 @@ where
 
 impl<C> Form<C>
 where
-    C: NewConnector + connect::Connect,
+    C: Clone + Sync + Send + Unpin + 'static + connect::Connect,
 {
     /// Find a form input using the given `locator` and set its value to `value`.
     pub async fn set(
